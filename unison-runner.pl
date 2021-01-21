@@ -66,14 +66,12 @@ print STDERR Dumper( $config );
   use Data::Dumper;
   print STDERR Dumper( $self->{_syncs} );
 
-  my $icon = Gtk3::StatusIcon->new_from_file(
-      "/usr/share/icons/gnome-colors-common/32x32/apps/bluefish.png"
-    );
+  my $icon = Gtk3::StatusIcon->new_from_icon_name( 'emblem-new' );
 
   $icon->set_title( 'Unison Runner' );
 
   $icon->signal_connect( 'popup-menu' => sub { $self->_popup_menu } );
-  $icon->signal_connect( 'activate'   => sub { dump_params('activate', @_) } );
+  $icon->signal_connect( 'activate'   => sub { $self->activate } );
 
   $self->{icon} = $icon;
 
@@ -101,6 +99,8 @@ sub _parse_config {
     $sync{ remote } = $remote;
   }
 
+  return unless $sync{local} and $sync{remote};
+
   if (exists $cfg->{paths}) {
     my @paths = split /\s*,\s*/, $cfg->{paths};
     $sync{ paths } = \@paths;
@@ -127,7 +127,45 @@ sub on_timeout {
 }
 
 sub activate {
+  my ($self) = @_;
 
+  if (my $window = $self->{window}) {
+    $window->present;
+    return;
+  }
+
+  my $window = $self->{window} = Gtk3::Window->new;
+  $window->set_title("Unison Runner Status");
+  $window->set_border_width(10);
+
+  $window->signal_connect (destroy => sub {
+      delete $self->{window};
+      delete $self->{objs};
+    });
+
+  my $main = Gtk3::VBox->new(0, 10);
+  for my $sync (values %{ $self->{_syncs} }) {
+
+    my $frame = Gtk3::Frame->new( $sync->{name} );
+    $main->add( $frame );
+
+    my $hbox = Gtk3::HBox->new( 0, 5);
+    $frame->add( $hbox );
+  }
+
+  my $frame = Gtk3::Frame->new();
+  $main->add( $frame );
+
+
+  my $button = Gtk3::Button->new_from_stock('gtk-quit');
+  $button->signal_connect( clicked => sub { $self->_end_runner } );
+  $frame->add( $button );
+
+  $window->add( $main );
+
+  $window->show_all;
+
+  return 1;
 }
 
 sub _popup_menu {
@@ -163,12 +201,7 @@ sub handle_childs {
   my $finished = $self->wait_for_children();
   if ( @$finished ) {
     for my $fin (@$finished) {
-      my $sname = $fin->{sync_name};
-
-      my $sync = $self->{_syncs}->{ $sname };
-      $sync->{run_after} = time + $self->{__frequency};
-
-      delete $self->{_running}->{ $sname };
+      $self->_handle_ending( $fin );
     }
   }
 
@@ -183,7 +216,14 @@ sub handle_childs {
       and !$self->{_running}->{ $_->{name} }
     } values %{ $self->{_syncs} };
 
-  return unless $to_run;
+  unless ($to_run) {
+    my $have_errors = grep { $_->{had_errors} } values %{ $self->{_syncs} };
+    my $iname = $have_errors ? 'emblem-important' : 'emblem-default';
+    $self->{icon}->set_from_icon_name( $iname )
+      unless scalar keys %{ $self->{_running} };
+
+    return;
+  }
 
   my $child = $self->fork_child( sub {
       _sync_handler( $to_run );
@@ -194,21 +234,59 @@ sub handle_childs {
 
   $self->{_running}->{ $to_run->{name} } = $child;
 
+  $self->{icon}->set_from_icon_name( 'emblem-synchronizing' );
+
   print STDERR time, ": handling childs\n";
 }
 
+sub _handle_ending {
+  my ($self, $fin) = @_;
+
+  my $sname = $fin->{sync_name};
+
+  my $sync = $self->{_syncs}->{ $sname };
+  $sync->{run_after} = time + $self->{__frequency};
+  my $pid = $fin->{pid};
+
+  $sync->{had_errors} = $fin->{exit_code} || 0;
+
+  delete $sync->{last_output};
+  
+  my $outfname = "/tmp/unirun.$pid.out";
+  if ( -f $outfname ) {
+    open my $fh, '<', $outfname;
+    if ($fh) {
+      local $/=undef;
+      my $out = <$fh>;
+
+      $sync->{last_output} = $out;
+
+      close $fh;
+    }
+
+    unlink $outfname;
+  }
+
+  delete $self->{_running}->{ $sname };
+}
 
 sub _sync_handler {
   my ($to_run) = @_;
- 
-  my @parts = ('/usr/bin/unison', '-auto', '-batch', '-smb');
 
-  push @parts, $to_run->{local}, $to_run->{remote};
+  my $bin  = '/usr/bin/unison'; 
+  my @args = ('-auto', '-batch', '-fat');
+
+  push @args, $to_run->{local}, $to_run->{remote};
 
   if ($to_run->{paths}) {
-    push @parts, '-path', $_
+    push @args, '-path', $_
       for @{ $to_run->{paths} };
   }
+
+  close STDERR;
+  open STDERR, '>', "/tmp/unirun.$$.out";
+  close STDOUT;
+  open STDOUT, '>&', \*STDERR;
 
   print STDERR "remote: $to_run->{remote}\n";
   if ( $to_run->{remote} =~ m{\A/} ) {
@@ -225,16 +303,11 @@ sub _sync_handler {
 
     unless ( $dir and @files ) {
       print STDERR "$$: remote '$to_run->{remote}' is missing - SKIPing\n";
-      return;
+      exit 1;
     }
   }
 
-  use Data::Dumper;
-  print STDERR "$$: running: ", Dumper( $to_run => \@parts);
-
-  sleep 2;
-
-  print STDERR "$$: runned\n";
+  exec { $bin } @args;
 
   return;
 }
@@ -295,7 +368,7 @@ sub wait_for_children {
           $_->{exit_with_signal} = ($ec & 127);
           $_->{exit_with_coredump} = !!($ec & 128);
         } else {
-          $_->{exit_cocde} = $ec >> 8;
+          $_->{exit_code} = $ec >> 8;
         }
 
         $_->{exit_time} = time;
