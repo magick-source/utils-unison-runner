@@ -11,7 +11,21 @@ use POSIX qw(WNOHANG);
 
 my $config;
 
-my $fname = "$ENV{HOME}/.config/unison-runner.cfg";
+my $fname       = "$ENV{HOME}/.config/unison-runner.cfg";
+my $run_for     = 0;
+my $end_at      = 0;
+my $show_window = 0;
+
+GetOptions(
+    "config_file=s" => \$fname,
+    "run_for=i"     => \$run_for,
+    "show_window"   => \$show_window,
+  );
+
+if ($run_for) {
+  $end_at = time + $run_for;
+}
+
 print STDERR "fname: $fname\n";
 if ( -f $fname ) {
   $config = Config::Tiny->read( $fname );
@@ -32,14 +46,11 @@ sub FATAL;
 sub new {
   my ($class, $config) = @_;
 
-use Data::Dumper;
-print STDERR Dumper( $config );
-
   my $max_syncs = $config->{_}->{max_children} || 2;
   my $netdir    = $config->{_}->{netroot} || "$ENV{HOME}/netdir";
   $netdir       = "$ENV{HOME}/$netdir" unless $netdir =~ m{\A/};
 
-  my $frequency = $config->{_}->{frequency} || 60;
+  my $frequency = $config->{_}->{frequency} || 300;
 
   my $self = bless {
       _childs       => [],
@@ -63,8 +74,6 @@ print STDERR Dumper( $config );
   }
 
   $self->{_syncs} = \%syncs;
-  use Data::Dumper;
-  print STDERR Dumper( $self->{_syncs} );
 
   my $icon = Gtk3::StatusIcon->new_from_icon_name( 'emblem-new' );
 
@@ -77,6 +86,8 @@ print STDERR Dumper( $config );
 
   my $timer = Glib::Timeout->add( 250 => sub { $self->on_timeout } );
   $self->{timer} = $timer;
+
+  $self->activate if $show_window;
 
   return $self;
 }
@@ -111,6 +122,8 @@ sub _parse_config {
     $sync{ ignore } = \@ignore;
   }
 
+  $sync{status} = 'new';
+
   return \%sync;
 }
 
@@ -120,6 +133,9 @@ sub run {
 
 sub on_timeout {
   my ($self) = @_;
+
+  $self->stop
+    if ($end_at and time > $end_at and !$self->{stopping});
 
   $self->handle_childs;
 
@@ -144,28 +160,178 @@ sub activate {
     });
 
   my $main = Gtk3::VBox->new(0, 10);
-  for my $sync (values %{ $self->{_syncs} }) {
-
-    my $frame = Gtk3::Frame->new( $sync->{name} );
-    $main->add( $frame );
-
-    my $hbox = Gtk3::HBox->new( 0, 5);
-    $frame->add( $hbox );
+  for my $sname (sort keys %{ $self->{_syncs} }) {
+    my $sync = $self->{_syncs}->{$sname};
+    $main->add( $self->_sync_frame( $sync ) );
   }
 
   my $frame = Gtk3::Frame->new();
   $main->add( $frame );
 
+  my $hbox = Gtk3::HBox->new(0, 5);
+  $hbox->set_border_width( 5 );
+  $hbox->set_halign( 'end' );
+  $frame->add( $hbox );
 
-  my $button = Gtk3::Button->new_from_stock('gtk-quit');
+  my $button = Gtk3::Button->new_from_stock('gtk-close');
+  $button->signal_connect( clicked => sub { $self->{window}->destroy; } );
+  $hbox->add( $button );
+
+  $button = Gtk3::Button->new_from_stock('gtk-quit');
   $button->signal_connect( clicked => sub { $self->_end_runner } );
-  $frame->add( $button );
+  $hbox->add( $button );
 
   $window->add( $main );
 
   $window->show_all;
 
   return 1;
+}
+
+sub _sync_frame {
+  my ($self, $sync) = @_;
+
+  my $frame = Gtk3::Frame->new( " $sync->{name} " );
+
+  my $hbox = Gtk3::HBox->new( 0, 5);
+  $hbox->set_border_width( 5 );
+  $frame->add( $hbox );
+
+  my $icon = Gtk3::Image->new();
+  $icon->set_valign('start');
+  $hbox->add( $icon );
+
+
+  my $vbox = Gtk3::VBox->new(0, 5);
+  my $label = Gtk3::Label->new("local : $sync->{local}");
+  $label->set_halign( 'start' );
+  $vbox->add( $label );
+  
+  $label = Gtk3::Label->new("remote: $sync->{remote}");
+  $label->set_halign( 'start' );
+  $vbox->add( $label );
+
+  my $slabel = Gtk3::Label->new("");
+  $slabel->set_halign( 'start' );
+  $vbox->add( $slabel );
+
+
+  $vbox->add( Gtk3::HSeparator->new() );
+
+  my $outbox = Gtk3::HBox->new( 0, 5 );
+  my $olabel = Gtk3::Label->new('');
+  $outbox->add( $olabel );
+
+  my $imore = Gtk3::Button->new_from_icon_name('emblem-documents', 4);
+  $imore->signal_connect( clicked => sub { $self->_show_output( $sync ) } );
+  $outbox->add( $imore );
+
+  $outbox->set_halign( 'start' );
+  $vbox->add( $outbox );
+
+  $self->{objs}->{ $sync->{name} } = {
+      icon    => $icon,
+      output  => $olabel,
+      status  => $slabel,
+    };
+
+  $hbox->add( $vbox );
+
+  $self->_update_sync( $sync );
+
+  return $frame;
+}
+
+sub _update_sync {
+  my ($self, $sync) = @_;
+
+  return unless $self->{window} and $self->{objs};
+
+  my $objs = $self->{objs}->{ $sync->{name} };
+
+  my $iname = _icon_for_status( $sync->{status} );
+  my $size = 5; # GTK_ICON_SIZE_DND (32px)
+  $objs->{icon}->set_from_icon_name( $iname, $size );
+
+  my $outend = (split /\n/, ($sync->{last_output}||''))[-1];
+  $objs->{output}->set_text( $outend || '' );
+
+  $objs->{status}->set_text("status: $sync->{status}");
+
+  return;
+}
+
+sub _show_output {
+  my ($self, $sync) = @_;
+
+  if ( $self->{owindow} ) {
+    $self->_update_output_window( $sync );
+    return;
+  }
+
+  my $owindow = $self->{owindow} = Gtk3::Window->new();
+  $owindow->set_border_width(10);
+  $owindow->set_icon_name( 'emblem-documents' );
+  $owindow->set_default_size( 350, 350 );
+
+  $owindow->signal_connect (destroy => sub {
+      delete $self->{owindow};
+      delete $self->{otextbuffer};
+    });
+
+  my $vbox = Gtk3::VBox->new( 0, 5 );
+  $owindow->add( $vbox );
+
+  my $frame = Gtk3::Frame->new();
+  $vbox->set_homogeneous(0);
+  $vbox->add( $frame );
+
+  my $swin = Gtk3::ScrolledWindow->new(undef, undef);
+  $swin->set_policy( 'automatic', 'automatic' );
+  $swin->set_shadow_type('in');
+  $swin->set_halign('fill');
+  $swin->set_valign('fill');
+  $swin->set_hexpand( 1 );
+  $swin->set_vexpand( 1 );
+
+  $frame->add( $swin );
+
+  my $otext = Gtk3::TextView->new();
+  $self->{otextbuffer} = $otext->get_buffer();
+
+  $swin->add( $otext );
+ 
+  $frame = Gtk3::Frame->new();
+
+  my $hbox = Gtk3::HBox->new(0, 5);
+  $hbox->set_border_width( 5 );
+  $hbox->set_halign( 'end' );
+  $frame->add( $hbox );
+
+  my $button = Gtk3::Button->new_from_stock('gtk-close');
+  $button->signal_connect( clicked => sub { $self->{owindow}->destroy; } );
+  $hbox->add( $button );
+   
+  $vbox->pack_end( $frame, 0, 1, 5 );
+
+  $owindow->show_all;
+  $self->_update_output_window( $sync );
+
+  return;
+}
+
+sub _update_output_window {
+  my ($self, $sync) = @_;
+
+  my $owindow = $self->{owindow};
+  $owindow->set_title("Output for sync '$sync->{name}'");
+
+  my $buff = $self->{otextbuffer};
+  $buff->set_text( $sync->{last_output}, length $sync->{last_output} );
+
+  $owindow->present;
+
+  return;
 }
 
 sub _popup_menu {
@@ -217,13 +383,11 @@ sub handle_childs {
     } values %{ $self->{_syncs} };
 
   unless ($to_run) {
-    my $have_errors = grep { $_->{had_errors} } values %{ $self->{_syncs} };
-    my $iname = $have_errors ? 'emblem-important' : 'emblem-default';
-    $self->{icon}->set_from_icon_name( $iname )
-      unless scalar keys %{ $self->{_running} };
-
+    $self->_update_status();
     return;
   }
+
+  $to_run->{status} = 'sync';
 
   my $child = $self->fork_child( sub {
       _sync_handler( $to_run );
@@ -234,9 +398,50 @@ sub handle_childs {
 
   $self->{_running}->{ $to_run->{name} } = $child;
 
-  $self->{icon}->set_from_icon_name( 'emblem-synchronizing' );
+  $self->_update_status( $to_run );
 
-  print STDERR time, ": handling childs\n";
+  return;
+}
+
+sub _icon_for_status {
+  my ($status) = @_;
+
+  my $iname = {
+      ok      => 'emblem-default',
+      new     => 'emblem-new',
+      error   => 'emblem-important',
+      skiped  => 'emblem-unreadable',
+      sync    => 'emblem-synchronizing',
+    }->{ $status } || 'emblem-generic';
+ 
+  return $iname;
+}
+
+sub _update_status {
+  my ($self, $sync) = @_;
+
+  my $status;
+  my %status = ();
+  $status{ $_->{status} }++
+    for values %{ $self->{_syncs} };
+  for my $st (qw( sync error skiped new ok )) {
+    if ( $status{ $st } ) {
+      $status = $st;
+      last;
+    }
+  }
+
+  my $iname = _icon_for_status( $status );
+
+  $self->{icon}->set_from_icon_name( $iname );
+  if ( $self->{ window } ) {
+    $self->{window}->set_icon_name( $iname );
+    if ( $sync ) {
+      $self->_update_sync( $sync );
+    }
+  }
+
+  return;
 }
 
 sub _handle_ending {
@@ -248,7 +453,7 @@ sub _handle_ending {
   $sync->{run_after} = time + $self->{__frequency};
   my $pid = $fin->{pid};
 
-  $sync->{had_errors} = $fin->{exit_code} || 0;
+  $sync->{status} = $fin->{exit_code} ? 'error' : 'ok';
 
   delete $sync->{last_output};
   
@@ -261,6 +466,14 @@ sub _handle_ending {
 
       $sync->{last_output} = $out;
 
+      if ($sync->{status} eq 'error') {
+        if ($out =~ m{SKIPing}) {
+          $sync->{status} = 'skiped';
+        }
+      }
+      print STDERR "Error for $sname:\n$out\n------------\n\n"
+        if $sync->{had_errors} and -t STDERR;
+
       close $fh;
     }
 
@@ -268,13 +481,17 @@ sub _handle_ending {
   }
 
   delete $self->{_running}->{ $sname };
+
+  $self->_update_status( $sync );
+
+  return;
 }
 
 sub _sync_handler {
   my ($to_run) = @_;
 
   my $bin  = '/usr/bin/unison'; 
-  my @args = ('-auto', '-batch', '-fat');
+  my @args = ('-log=false', '-auto', '-batch', '-fat');
 
   push @args, $to_run->{local}, $to_run->{remote};
 
@@ -289,6 +506,10 @@ sub _sync_handler {
   open STDOUT, '>&', \*STDERR;
 
   print STDERR "remote: $to_run->{remote}\n";
+
+  my @pargs = map { "'$_'" } @args;
+  print STDERR "sync command: {\n $bin @pargs \n}\n";
+
   if ( $to_run->{remote} =~ m{\A/} ) {
     # just checking is not enough in the cases where
     # the path is part of a smbnetfs mountpoint
@@ -307,9 +528,9 @@ sub _sync_handler {
     }
   }
 
+  # exec doesn't return
+  # - which is what we want for any error to propagate
   exec { $bin } @args;
-
-  return;
 }
 
 sub dump_params {
