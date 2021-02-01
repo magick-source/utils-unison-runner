@@ -56,9 +56,9 @@ options are supported for each synchronization
 #netroot = root of the remote directories
 netroot       = .
 #max_children = the max number of unison synchs running at the same time
-max_children  = 1
-#frequency = how often is each folder sync'd.
-frequency     = 10
+max_children  = 2
+#frequency = how often is each folder sync'd in seconds.
+frequency     = 60
 
 [test]
 local   = local
@@ -74,7 +74,7 @@ remote  = remote
 
 ## potential WTFs
 
-* **skiped is remote is empty** - I use this to synchronize between my
+* **skiped if the remote is empty** - I use this to synchronize between my
 desktop and my SMB NAS. I mount the NAS using ftab mounts. In my setup
 if the remote directory is empty, it means that the share was not mounted,
 so I don't want to run unison on that empty directory. If you are starting
