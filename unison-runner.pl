@@ -476,7 +476,7 @@ sub _handle_ending {
         }
       }
       print STDERR "Error for $sname:\n$out\n------------\n\n"
-        if $sync->{had_errors} and -t STDERR;
+        if $sync->{status} eq 'error' and -t STDERR;
 
       close $fh;
     }
@@ -523,7 +523,7 @@ sub _sync_handler {
     opendir(my $dir, $to_run->{remote}) || do { $error = 1 };
     my @files;
     if (!$error ) {
-      @files = readdir $dir;
+      @files = grep { $_ !~ m{\A\.\.?\z} } readdir $dir;
     }
 
     unless ( $dir and @files ) {
