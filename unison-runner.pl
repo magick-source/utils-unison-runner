@@ -342,7 +342,11 @@ sub _popup_menu {
   my $_mn_quit = Gtk3::ImageMenuItem->new_with_label("Quit");
   $_mn_quit->signal_connect( activate  => sub { $self->_end_runner } );
   $menu->add( $_mn_quit );
- 
+
+  my $_mn_activate = Gtk3::ImageMenuItem->new_with_label("Show window");
+  $_mn_activate->signal_connect( activate => sub { $self->activate; } );
+  $menu->add( $_mn_activate );
+
   $menu->show_all;
 
   $app->{menu} = $menu;
