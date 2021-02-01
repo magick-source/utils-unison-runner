@@ -87,3 +87,22 @@ time making it work, specially because I don't have problems mounting my
 shares with ftab entries. If you manage to make unison work with smbnetfs
 tell me how, please.
 
+## Unknows
+
+* **remote shell and/or socket methods** - I want to test this with ssh
+and socket methods, but I didn't yet - I don't have a current need or a
+server running unison to test it quickly. If you test it, let me know.
+
+## Bug, suggestions, merge requests
+
+Bug reports and suggestions are always welcome in the
+[Magick Source](http://magick-source.net).
+
+Merge requests are even more welcome.
+
+## License
+
+This is licensed as free software, under
+[the Artistic License](https://dev.perl.org/licenses/artistic.html).
+
+
