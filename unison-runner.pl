@@ -11,6 +11,8 @@ use POSIX qw(WNOHANG);
 
 my $config;
 
+my $VERSION = "v.0.1.1";
+
 my $fname       = "$ENV{HOME}/.config/unison-runner.cfg";
 my $run_for     = 0;
 my $end_at      = 0;
@@ -253,8 +255,16 @@ sub _update_sync {
   my $size = 5; # GTK_ICON_SIZE_DND (32px)
   $objs->{icon}->set_from_icon_name( $iname, $size );
 
-  my $outend = (split /\n/, ($sync->{last_output}||''))[-1];
-  $objs->{output}->set_text( $outend || '' );
+  my $outend;
+  $sync->{last_output} ||= '';
+  if ( $sync->{last_output} =~ m{sync command: \{[^\}]+\}\s*\z}sm ) {
+    # we only have the run command, so nothing to show
+    $outend = '-- nothing to show --';
+  } else {
+    $outend = (split /\n/, ($sync->{last_output}||''))[-1];
+  }
+
+  $objs->{output}->set_text( $outend || '-- nothing to show --' );
 
   $objs->{status}->set_text("status: $sync->{status}");
 
@@ -495,7 +505,7 @@ sub _sync_handler {
   my ($to_run) = @_;
 
   my $bin  = '/usr/bin/unison'; 
-  my @args = ('-log=false', '-auto', '-batch', '-fat');
+  my @args = ('-log=false', '-auto', '-batch', '-fat', '-terse');
 
   push @args, $to_run->{local}, $to_run->{remote};
 
@@ -528,6 +538,23 @@ sub _sync_handler {
 
     unless ( $dir and @files ) {
       print STDERR "$$: remote '$to_run->{remote}' is missing - SKIPing\n";
+      exit 1;
+    }
+  }
+
+  if ( $to_run->{check_local} ) {
+    # in some cases we may want to check the local directory as well
+    # as this allows sync'ng two mounted directories if they are both
+    # mountpoints
+    my $error = 0;
+    opendir(my $dir, $to_run->{local}) || do { $error = 1 };
+    my @files;
+    if (!$error ) {
+      @files = grep { $_ !~ m{\A\.\.?\z} } readdir $dir;
+    }
+
+    unless ( $dir and @files ) {
+      print STDERR "$$: local dir '$to_run->{local}' is missing - SKIPing\n";
       exit 1;
     }
   }
